@@ -12,7 +12,14 @@ def serpapi_search(query):
         "num": 5
     }
     response = requests.get("https://serpapi.com/search", params=params)
-    response.raise_for_status()
+    # Debug prints to help identify issues
+    st.write(f"SerpAPI response status: {response.status_code}")
+    st.write(f"SerpAPI response text: {response.text[:500]}")  # Limit output length
+
+    if response.status_code != 200:
+        st.error(f"SerpAPI error: {response.status_code} - {response.text}")
+        return []
+
     data = response.json()
     results = []
     for result in data.get("organic_results", []):
@@ -77,3 +84,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
