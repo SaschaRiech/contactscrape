@@ -14,7 +14,9 @@ logger = logging.getLogger(__name__)
 # Constants
 SERPAPI_API_KEY = st.secrets.get("SERPAPI_API_KEY", "")
 OUTPUT_FILE = "internet_contacts.csv"
-PHONE_REGEX = r'(?:(?:\+44\s?|0)\s?(7[0-9]{2})\s?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3,4})'
+# Combine original ChatGPT regex with current for better coverage
+PHONE_REGEX = r'(?:(?:\+44\s?|0)\s?(7[0-9]{2})\s?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3,4})|' \
+              r'(?:\+44\s?7\d{3}\s?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3,4}|0\s?7\d{3}\s?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3,4}|\(?07\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{3,4})'
 EMAIL_REGEX = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
 
 def serpapi_search(query: str, num_results: int = 10) -> List[dict]:
@@ -47,6 +49,28 @@ def serpapi_search(query: str, num_results: int = 10) -> List[dict]:
         st.error(f"Unexpected error: {e}")
         return []
 
+# Alternative using googlesearch (uncomment to use)
+"""
+try:
+    from googlesearch import search
+except ModuleNotFoundError:
+    st.error("The 'googlesearch-python' library is not installed. Please add 'googlesearch-python' to your requirements.txt file.")
+    st.stop()
+
+def serpapi_search(query: str, num_results: int = 10) -> List[dict]:
+    results = []
+    try:
+        logger.info(f"Executing Google search query: {query}")
+        for url in search(query, num_results=num_results, pause=2.0):
+            results.append({"link": url, "title": url})
+        logger.info(f"Found {len(results)} search results for query: {query}")
+        return results
+    except Exception as e:
+        logger.error(f"Error fetching search results: {e}")
+        st.error(f"Error fetching search results: {e}. Google may be blocking the request.")
+        return []
+"""
+
 def extract_contacts(text: str) -> tuple[Set[str], Set[str]]:
     """Extract email addresses and phone numbers from text."""
     emails = set(re.findall(EMAIL_REGEX, text, re.IGNORECASE))
@@ -54,11 +78,13 @@ def extract_contacts(text: str) -> tuple[Set[str], Set[str]]:
     phones = set()
     for phone in phones_raw:
         # Normalize phone number: remove spaces, dashes, parentheses
-        normalized = re.sub(r'[\s\-\(\)]', '', phone)
+        normalized = re.sub(r'[\s\-\(\)]', '', phone[0] if isinstance(phone, tuple) else phone)
         # Convert to +44 format if it starts with 0
         if normalized.startswith('0'):
             normalized = '+44' + normalized[1:]
-        phones.add(normalized)
+        if normalized.startswith('+447') or normalized.startswith('07'):  # Validate UK mobile
+            phones.add(normalized)
+    logger.debug(f"Extracted {len(emails)} emails and {len(phones)} phones from text")
     return emails, phones
 
 def fetch_page_text(url: str) -> str:
@@ -75,6 +101,7 @@ def fetch_page_text(url: str) -> str:
             script_or_style.decompose()
         text = soup.get_text(separator=" ", strip=True)
         logger.info(f"Successfully fetched and parsed {url}")
+        logger.debug(f"Page text (first 500 chars): {text[:500]}")
         return text
     except requests.RequestException as e:
         logger.warning(f"Failed to fetch or parse {url}: {e}")
@@ -106,6 +133,7 @@ def main():
     name = st.text_input("Full Name (required)", value="Sascha Riech")
     company = st.text_input("Company (optional)", "")
     num_results = st.slider("Number of search results", min_value=5, max_value=50, value=10)
+    restrict_uk = st.checkbox("Restrict to UK websites (site:*.uk)", value=False)
 
     if st.button("Find Contacts"):
         if not name.strip():
@@ -115,13 +143,15 @@ def main():
         query = f'"{name.strip()}"'
         if company.strip():
             query += f' "{company.strip()}"'
-        query += " contact OR email OR phone site:*.uk"  # Focus on UK sites for mobile numbers
+        query += " contact OR email OR phone"
+        if restrict_uk:
+            query += " site:*.uk"
 
         st.info(f"Searching the internet for: {query}")
         results = serpapi_search(query, num_results=num_results)
 
         if not results:
-            st.write("No search results found for your query.")
+            st.write("No search results found for your query. Try broadening the search (e.g., remove 'site:*.uk' or change the name).")
             return
 
         all_contacts = []
@@ -129,7 +159,7 @@ def main():
 
         for result in results:
             url = result.get("link")
-            title = result.get("title", "No title")
+            title = result.get("title", url)
             st.markdown(f"### [{title}]({url})")
             page_text = fetch_page_text(url)
             if not page_text:
@@ -166,7 +196,7 @@ def main():
                 st.write("**Mobile Phones:**", ", ".join(phones))
             save_to_csv(all_contacts, OUTPUT_FILE)
         else:
-            st.warning("No emails or mobile numbers found in the search results.")
+            st.warning("No emails or mobile numbers found in the search results. Try a different query or uncheck 'Restrict to UK websites'.")
 
 if __name__ == "__main__":
     main()
