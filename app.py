@@ -48,14 +48,14 @@ def extract_contacts(text: str) -> Tuple[List[str], List[str]]:
     emails = list(set(re.findall(EMAIL_REGEX, text, re.IGNORECASE)))
     phones_raw = re.findall(PHONE_REGEX, text, re.IGNORECASE)
     phones = list(set([re.sub(r'[\s\-\(\)]', '', phone[0] + phone[1]) for phone in phones_raw]))
-    phones = [phone if phone.startswith('+44Rice) else '+44' + phone[1:] if phone.startswith('0') else phone for phone in phones]
+    phones = [phone if phone.startswith('+44') else '+44' + phone[1:] if phone.startswith('0') else phone for phone in phones]
     return emails, phones
 
 def search_repositories(query: str, github_client: Github) -> List[dict]:
     """Search GitHub repositories for a given query."""
     repos = []
     try:
-        # Perform the search with proper pagination handling
+        logger.info(f"Executing GitHub search query: {query}")
         search_results = github_api_call(github_client.search_repositories, query=query, sort="stars", order="desc")
         
         # Check if search_results is valid and has items
@@ -140,7 +140,15 @@ def main():
         st.markdown("Generate a token at [GitHub Settings](https://github.com/settings/tokens) with 'repo' scope.")
         st.stop()
 
-    github_client = Github(GITHUB_API_TOKEN)
+    # Validate GitHub API token
+    try:
+        github_client = Github(GITHUB_API_TOKEN)
+        github_client.get_user().login  # Test token validity
+    except GithubException as e:
+        st.error(f"Invalid GitHub API token: {e.data.get('message', 'Unknown error')}")
+        st.markdown("Generate a new token at [GitHub Settings](https://github.com/settings/tokens) with 'repo' scope.")
+        st.stop()
+
     name = st.text_input("Full Name (required)", "")
     company = st.text_input("Company (optional)", "")
 
