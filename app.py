@@ -6,29 +6,60 @@ import logging
 import pandas as pd
 from typing import List, Set
 import time
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# Try importing googlesearch
+try:
+    from googlesearch import search
+except ModuleNotFoundError:
+    st.error("The 'googlesearch-python' library is not installed. Please add 'googlesearch-python' to your requirements.txt file.")
+    st.stop()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Constants
-SERPAPI_API_KEY = st.secrets.get("SERPAPI_API_KEY", "")
 OUTPUT_FILE = "internet_contacts.csv"
-# Use original ChatGPT phone regex for consistency
 PHONE_REGEX = r'(?:\+44\s?7\d{3}|0\s?7\d{3}|\(?07\d{3}\)?)\s?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3,4}'
 EMAIL_REGEX = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
 
+def googlesearch_search(query: str, num_results: int = 10) -> List[dict]:
+    """Search Google using googlesearch-python with retries and User-Agent rotation."""
+    results = []
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.101 Safari/537.36"
+    ]
+    try:
+        logger.info(f"Executing Google search query: {query}")
+        headers = {"User-Agent": user_agents[time.time_ns() % len(user_agents)]}  # Rotate User-Agent
+        session = requests.Session()
+        retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+        session.mount('http://', HTTPAdapter(max_retries=retries))
+        session.mount('https://', HTTPAdapter(max_retries=retries))
+        for url in search(query, num_results=num_results, pause=4.0):
+            results.append({"link": url, "title": url})
+        logger.info(f"Found {len(results)} search results for query: {query}")
+        return results
+    except Exception as e:
+        logger.error(f"Error fetching search results: {e}")
+        st.error(f"Error fetching search results: {e}. Google may be blocking the request.")
+        return []
+
+# Alternative using SerpAPI (uncomment to use if you have a key)
+"""
 def serpapi_search(query: str, num_results: int = 10) -> List[dict]:
-    """Search Google using SerpAPI."""
-    if not SERPAPI_API_KEY:
+    if not st.secrets.get("SERPAPI_API_KEY", ""):
         st.error("SerpAPI key not configured. Please add 'SERPAPI_API_KEY' to Streamlit secrets.")
         st.markdown("Get a key at [SerpAPI](https://serpapi.com).")
         return []
-
     params = {
         "engine": "google",
         "q": query,
-        "api_key": SERPAPI_API_KEY,
+        "api_key": st.secrets["SERPAPI_API_KEY"],
         "num": num_results
     }
     try:
@@ -47,30 +78,6 @@ def serpapi_search(query: str, num_results: int = 10) -> List[dict]:
         logger.error(f"Unexpected error during search: {e}")
         st.error(f"Unexpected error: {e}")
         return []
-
-# Alternative using googlesearch (uncomment to use if no SerpAPI key)
-"""
-try:
-    from googlesearch import search
-except ModuleNotFoundError:
-    st.error("The 'googlesearch-python' library is not installed. Please add 'googlesearch-python' to your requirements.txt file.")
-    st.stop()
-
-def serpapi_search(query: str, num_results: int = 10) -> List[dict]:
-    results = []
-    try:
-        logger.info(f"Executing Google search query: {query}")
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-        for url in search(query, num_results=num_results, pause=3.0):
-            results.append({"link": url, "title": url})
-        logger.info(f"Found {len(results)} search results for query: {query}")
-        return results
-    except Exception as e:
-        logger.error(f"Error fetching search results: {e}")
-        st.error(f"Error fetching search results: {e}. Google may be blocking the request.")
-        return []
 """
 
 def extract_contacts(text: str) -> tuple[Set[str], Set[str]]:
@@ -79,12 +86,10 @@ def extract_contacts(text: str) -> tuple[Set[str], Set[str]]:
     phones_raw = re.findall(PHONE_REGEX, text, re.IGNORECASE)
     phones = set()
     for phone in phones_raw:
-        # Normalize phone number: remove spaces, dashes, parentheses
         normalized = re.sub(r'[\s\-\(\)]', '', phone)
-        # Convert to +44 format if it starts with 0
         if normalized.startswith('0'):
             normalized = '+44' + normalized[1:]
-        if normalized.startswith('+447') or normalized.startswith('07'):  # Validate UK mobile
+        if normalized.startswith('+447') or normalized.startswith('07'):
             phones.add(normalized)
     logger.debug(f"Extracted {len(emails)} emails and {len(phones)} phones from text")
     return emails, phones
@@ -98,7 +103,6 @@ def fetch_page_text(url: str) -> str:
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
-        # Remove scripts, styles, and noscript tags
         for script_or_style in soup(["script", "style", "noscript"]):
             script_or_style.decompose()
         text = soup.get_text(separator=" ", strip=True)
@@ -150,7 +154,7 @@ def main():
             query += " site:*.uk"
 
         st.info(f"Searching the internet for: {query}")
-        results = serpapi_search(query, num_results=num_results)
+        results = googlesearch_search(query, num_results=num_results)
 
         if not results:
             st.write("No search results found for your query. Try broadening the search (e.g., remove 'site:*.uk' or change the name).")
