@@ -1,127 +1,164 @@
 import streamlit as st
-import requests
 import re
-from bs4 import BeautifulSoup
+import requests
+from github import Github, GithubException
+import logging
+import pandas as pd
+from ratelimit import limits, sleep_and_retry
+from typing import List, Tuple
+import time
 
-SERPAPI_API_KEY = st.secrets["SERPAPI_API_KEY"]
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-def serpapi_search(query, num_results=10):
-    params = {
-        "engine": "google",
-        "q": query,
-        "api_key": SERPAPI_API_KEY,
-        "num": num_results
-    }
+# Constants
+GITHUB_API_TOKEN = st.secrets.get("GITHUB_API_TOKEN", "")  # Store in Streamlit secrets or environment variable
+RATE_LIMIT_CALLS = 5000  # GitHub API rate limit (5000/hour for authenticated users)
+RATE_LIMIT_PERIOD = 3600  # 1 hour in seconds
+EMAIL_REGEX = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+PHONE_REGEX = r'(\+44\s?|0)\s?(7[0-9]{2})\s?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3,4}'
+OUTPUT_FILE = "github_contacts.csv"
+
+@sleep_and_retry
+@limits(calls=RATE_LIMIT_CALLS, period=RATE_LIMIT_PERIOD)
+def github_api_call(func, *args, **kwargs):
+    """Wrapper to handle GitHub API rate limiting and errors."""
     try:
-        response = requests.get("https://serpapi.com/search", params=params, timeout=15)
-        response.raise_for_status()
-        data = response.json()
-        return data.get("organic_results", [])
-    except requests.RequestException as e:
-        st.error(f"Error fetching search results: {e}")
-        return []
+        return func(*args, **kwargs)
+    except GithubException as e:
+        logger.error(f"GitHub API error: {e}")
+        if e.status == 403:  # Rate limit exceeded
+            logger.warning("Rate limit exceeded. Sleeping for 60 seconds.")
+            time.sleep(60)
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        raise
 
-def extract_emails(text):
-    # Common email regex, case insensitive
-    emails = re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", text, re.I)
-    return list(set(emails))
+def extract_contacts(text: str) -> Tuple[List[str], List[str]]:
+    """Extract email addresses and phone numbers from text."""
+    emails = list(set(re.findall(EMAIL_REGEX, text, re.IGNORECASE)))
+    phones_raw = re.findall(PHONE_REGEX, text, re.IGNORECASE)
+    phones = list(set([re.sub(r'[\s\-\(\)]', '', phone[0] + phone[1]) for phone in phones_raw]))
+    phones = [phone if phone.startswith('+44') else '+44' + phone[1:] if phone.startswith('0') else phone for phone in phones]
+    return emails, phones
 
-def extract_uk_mobile_numbers(text):
-    # More flexible UK mobile number regex with spaces, dashes, parentheses
-    pattern = re.compile(
-        r"""
-        (?:\+44\s?7\d{3}      # +44 7xxx
-        |0\s?7\d{3}           # or 07xxx with optional space
-        |\(?07\d{3}\)?)       # or (07xxx) with optional parentheses
-        [\s\-]?\d{3}          # optional space/dash, 3 digits
-        [\s\-]?\d{3,4}        # optional space/dash, 3 or 4 digits
-        """,
-        re.VERBOSE
-    )
-
-    matches = pattern.findall(text)
-    normalized = set()
-    for match in matches:
-        phone = re.sub(r"[\s\-\(\)]", "", match)  # Remove spaces, dashes, parentheses
-        if phone.startswith("07"):
-            phone = "+44" + phone[1:]
-        elif phone.startswith("0"):
-            phone = "+44" + phone[1:]
-        normalized.add(phone)
-    return list(normalized)
-
-def fetch_page_text(url):
+def search_repositories(query: str, github_client: Github) -> List[dict]:
+    """Search GitHub repositories for a given query."""
+    repos = []
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; ContactFinder/1.0; +https://example.com/bot)"
-        }
-        resp = requests.get(url, headers=headers, timeout=10)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for script_or_style in soup(["script", "style", "noscript"]):
-            script_or_style.decompose()
-        text = soup.get_text(separator=" ", strip=True)
-        return text
-    except requests.RequestException:
-        return ""
+        search_results = github_api_call(github_client.search_repositories, query=query, sort="stars", order="desc")
+        for repo in search_results[:10]:  # Limit to 10 for demo purposes
+            repos.append({
+                "name": repo.full_name,
+                "url": repo.html_url,
+                "description": repo.description or ""
+            })
+        logger.info(f"Found {len(repos)} repositories for query: {query}")
+    except Exception as e:
+        logger.error(f"Error searching repositories: {e}")
+        st.error(f"Error searching GitHub: {e}")
+    return repos
+
+def scrape_repository(repo: dict, github_client: Github) -> List[dict]:
+    """Scrape a single repository for contact information."""
+    contacts = []
+    repo_name = repo["name"]
+    try:
+        repository = github_api_call(github_client.get_repo, repo_name)
+        
+        # Check README
+        try:
+            readme = github_api_call(repository.get_readme)
+            content = readme.decoded_content.decode("utf-8", errors="ignore")
+            emails, phones = extract_contacts(content)
+            for email in emails:
+                contacts.append({"repo": repo_name, "url": repo["url"], "email": email, "phone": ""})
+            for phone in phones:
+                contacts.append({"repo": repo_name, "url": repo["url"], "email": "", "phone": phone})
+        except GithubException:
+            logger.warning(f"No README found for {repo_name}")
+
+        # Check repository description
+        emails, phones = extract_contacts(repo["description"])
+        for email in emails:
+            contacts.append({"repo": repo_name, "url": repo["url"], "email": email, "phone": ""})
+        for phone in phones:
+            contacts.append({"repo": repo_name, "url": repo["url"], "email": "", "phone": phone})
+
+    except Exception as e:
+        logger.error(f"Error scraping {repo_name}: {e}")
+        st.error(f"Error scraping {repo_name}: {e}")
+    return contacts
+
+def save_to_csv(contacts: List[dict], filename: str):
+    """Save extracted contacts to a CSV file."""
+    if contacts:
+        df = pd.DataFrame(contacts)
+        df.to_csv(filename, index=False)
+        logger.info(f"Saved {len(contacts)} contacts to {filename}")
+        st.success(f"Saved {len(contacts)} contacts to {filename}")
+    else:
+        logger.warning("No contacts found to save.")
+        st.warning("No contacts found to save.")
 
 def main():
-    st.title("Free UK Contact Finder Prototype")
+    st.title("GitHub Contact Finder")
 
+    if not GITHUB_API_TOKEN:
+        st.error("GitHub API token not configured. Please add it to Streamlit secrets.")
+        return
+
+    github_client = Github(GITHUB_API_TOKEN)
     name = st.text_input("Full Name (required)", "")
     company = st.text_input("Company (optional)", "")
+
     if st.button("Find Contacts"):
         if not name.strip():
             st.warning("Please enter a full name.")
             return
-        
+
         query = f'"{name.strip()}"'
         if company.strip():
             query += f' "{company.strip()}"'
-        query += " contact OR email OR phone"
+        query += " in:readme in:description"
 
-        st.info("Searching Google via SerpAPI...")
-        results = serpapi_search(query, num_results=10)
+        st.info(f"Searching GitHub for: {query}")
+        repos = search_repositories(query, github_client)
 
-        if not results:
-            st.write("No results found for your query.")
+        if not repos:
+            st.write("No repositories found for your query.")
             return
-        
-        all_emails = set()
-        all_phones = set()
-        st.write(f"Found {len(results)} search results. Extracting contacts...")
 
-        for result in results:
-            url = result.get("link")
-            st.markdown(f"### [{result.get('title')}]({url})")
-            page_text = fetch_page_text(url)
-            if not page_text:
-                st.write("_Failed to fetch or parse page text._")
-                continue
+        all_contacts = []
+        st.write(f"Found {len(repos)} repositories. Extracting contacts...")
 
-            emails = extract_emails(page_text)
-            phones = extract_uk_mobile_numbers(page_text)
-
-            if emails:
-                all_emails.update(emails)
-                st.write("Emails:", ", ".join(emails))
+        for repo in repos:
+            st.markdown(f"### [{repo['name']}]({repo['url']})")
+            contacts = scrape_repository(repo, github_client)
+            if contacts:
+                for contact in contacts:
+                    if contact["email"]:
+                        st.write(f"Email: {contact['email']}")
+                    if contact["phone"]:
+                        st.write(f"Mobile Phone: {contact['phone']}")
+                all_contacts.extend(contacts)
             else:
-                st.write("Emails: None found")
+                st.write("No contacts found in this repository.")
+            time.sleep(1)  # Avoid overwhelming the API
 
-            if phones:
-                all_phones.update(phones)
-                st.write("Mobile Phones:", ", ".join(phones))
-            else:
-                st.write("Mobile Phones: None found")
-
-        if not all_emails and not all_phones:
-            st.warning("No emails or UK mobile numbers found in the search results.")
-        else:
+        if all_contacts:
             st.success("Summary of unique contacts found:")
-            if all_emails:
-                st.write("**Emails:**", ", ".join(sorted(all_emails)))
-            if all_phones:
-                st.write("**Mobile Phones:**", ", ".join(sorted(all_phones)))
+            emails = sorted(set(contact["email"] for contact in all_contacts if contact["email"]))
+            phones = sorted(set(contact["phone"] for contact in all_contacts if contact["phone"]))
+            if emails:
+                st.write("**Emails:**", ", ".join(emails))
+            if phones:
+                st.write("**Mobile Phones:**", ", ".join(phones))
+            save_to_csv(all_contacts, OUTPUT_FILE)
+        else:
+            st.warning("No emails or mobile numbers found in the search results.")
 
 if __name__ == "__main__":
     main()
