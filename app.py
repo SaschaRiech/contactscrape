@@ -1,19 +1,25 @@
 import streamlit as st
 import re
 import requests
-from github import Github, GithubException
 import logging
 import pandas as pd
 from ratelimit import limits, sleep_and_retry
 from typing import List, Tuple
 import time
 
+# Try importing PyGithub, handle missing module
+try:
+    from github import Github, GithubException
+except ModuleNotFoundError:
+    st.error("The 'PyGithub' library is not installed. Please add 'PyGithub' to your requirements.txt file.")
+    st.stop()
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Constants
-GITHUB_API_TOKEN = st.secrets.get("GITHUB_API_TOKEN", "")  # Store in Streamlit secrets or environment variable
+GITHUB_API_TOKEN = st.secrets.get("GITHUB_API_TOKEN", "")
 RATE_LIMIT_CALLS = 5000  # GitHub API rate limit (5000/hour for authenticated users)
 RATE_LIMIT_PERIOD = 3600  # 1 hour in seconds
 EMAIL_REGEX = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
@@ -31,6 +37,7 @@ def github_api_call(func, *args, **kwargs):
         if e.status == 403:  # Rate limit exceeded
             logger.warning("Rate limit exceeded. Sleeping for 60 seconds.")
             time.sleep(60)
+            st.error("GitHub API rate limit exceeded. Please try again later.")
         raise
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
@@ -41,24 +48,39 @@ def extract_contacts(text: str) -> Tuple[List[str], List[str]]:
     emails = list(set(re.findall(EMAIL_REGEX, text, re.IGNORECASE)))
     phones_raw = re.findall(PHONE_REGEX, text, re.IGNORECASE)
     phones = list(set([re.sub(r'[\s\-\(\)]', '', phone[0] + phone[1]) for phone in phones_raw]))
-    phones = [phone if phone.startswith('+44') else '+44' + phone[1:] if phone.startswith('0') else phone for phone in phones]
+    phones = [phone if phone.startswith('+44Rice) else '+44' + phone[1:] if phone.startswith('0') else phone for phone in phones]
     return emails, phones
 
 def search_repositories(query: str, github_client: Github) -> List[dict]:
     """Search GitHub repositories for a given query."""
     repos = []
     try:
+        # Perform the search with proper pagination handling
         search_results = github_api_call(github_client.search_repositories, query=query, sort="stars", order="desc")
-        for repo in search_results[:10]:  # Limit to 10 for demo purposes
+        
+        # Check if search_results is valid and has items
+        if not search_results or search_results.totalCount == 0:
+            logger.info(f"No repositories found for query: {query}")
+            st.warning(f"No repositories found for query: {query}")
+            return repos
+
+        # Safely iterate over results, limiting to 10
+        for repo in search_results.get_page(0)[:10]:  # Use get_page for pagination
             repos.append({
                 "name": repo.full_name,
                 "url": repo.html_url,
                 "description": repo.description or ""
             })
         logger.info(f"Found {len(repos)} repositories for query: {query}")
+    except GithubException as e:
+        logger.error(f"GitHub API error during search: {e}")
+        st.error(f"GitHub API error: {e.data.get('message', 'Unknown error')}")
+    except IndexError as e:
+        logger.error(f"Index error during repository search: {e}")
+        st.error("Unexpected error processing search results. Please try a different query.")
     except Exception as e:
-        logger.error(f"Error searching repositories: {e}")
-        st.error(f"Error searching GitHub: {e}")
+        logger.error(f"Unexpected error during search: {e}")
+        st.error(f"Unexpected error: {e}")
     return repos
 
 def scrape_repository(repo: dict, github_client: Github) -> List[dict]:
@@ -99,6 +121,13 @@ def save_to_csv(contacts: List[dict], filename: str):
         df.to_csv(filename, index=False)
         logger.info(f"Saved {len(contacts)} contacts to {filename}")
         st.success(f"Saved {len(contacts)} contacts to {filename}")
+        # Add download button for Streamlit Cloud
+        st.download_button(
+            label="Download Contacts as CSV",
+            data=df.to_csv(index=False).encode('utf-8'),
+            file_name="github_contacts.csv",
+            mime="text/csv"
+        )
     else:
         logger.warning("No contacts found to save.")
         st.warning("No contacts found to save.")
@@ -107,8 +136,9 @@ def main():
     st.title("GitHub Contact Finder")
 
     if not GITHUB_API_TOKEN:
-        st.error("GitHub API token not configured. Please add it to Streamlit secrets.")
-        return
+        st.error("GitHub API token not configured. Please add 'GITHUB_API_TOKEN' to Streamlit secrets.")
+        st.markdown("Generate a token at [GitHub Settings](https://github.com/settings/tokens) with 'repo' scope.")
+        st.stop()
 
     github_client = Github(GITHUB_API_TOKEN)
     name = st.text_input("Full Name (required)", "")
