@@ -12,9 +12,8 @@ def serpapi_search(query):
         "num": 5
     }
     response = requests.get("https://serpapi.com/search", params=params)
-    # Debug prints to help identify issues
     st.write(f"SerpAPI response status: {response.status_code}")
-    st.write(f"SerpAPI response text: {response.text[:500]}")  # Limit output length
+    st.write(f"SerpAPI response text: {response.text[:500]}")  # Debug output
 
     if response.status_code != 200:
         st.error(f"SerpAPI error: {response.status_code} - {response.text}")
@@ -27,11 +26,25 @@ def serpapi_search(query):
     return results
 
 def extract_emails(text):
-    return re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", text)
+    emails = re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", text)
+    return list(set(emails))  # Remove duplicates
 
 def extract_phones(text):
-    phone_pattern = r"(\+44\s?7\d{3}|\(?07\d{3}\)?)\s?\d{3}\s?\d{3}"
-    return re.findall(phone_pattern, text)
+    # UK mobile number patterns:
+    # Format examples: 07123 456789, +44 7123 456789, 07123456789, +447123456789
+    pattern = re.compile(
+        r'(?:\+44\s?7\d{3}|\b07\d{3})\s?\d{3}\s?\d{3}\b'
+    )
+    phones = pattern.findall(text)
+    # Normalize phones: remove spaces and format uniformly (optional)
+    normalized = set()
+    for phone in phones:
+        # Remove spaces, keep +44 or 0 prefix
+        p = phone.replace(" ", "")
+        if p.startswith("07"):
+            p = "+44" + p[1:]  # Convert 07... to +447...
+        normalized.add(p)
+    return list(normalized)
 
 def get_page_text(url):
     try:
@@ -80,7 +93,7 @@ def main():
                 if contact['emails']:
                     st.write("Emails:", ", ".join(contact['emails']))
                 if contact['phones']:
-                    st.write("Phones:", ", ".join(contact['phones']))
+                    st.write("Mobile Phones:", ", ".join(contact['phones']))
 
 if __name__ == "__main__":
     main()
