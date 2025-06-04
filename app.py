@@ -14,9 +14,8 @@ logger = logging.getLogger(__name__)
 # Constants
 SERPAPI_API_KEY = st.secrets.get("SERPAPI_API_KEY", "")
 OUTPUT_FILE = "internet_contacts.csv"
-# Combine original ChatGPT regex with current for better coverage
-PHONE_REGEX = r'(?:(?:\+44\s?|0)\s?(7[0-9]{2})\s?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3,4})|' \
-              r'(?:\+44\s?7\d{3}\s?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3,4}|0\s?7\d{3}\s?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3,4}|\(?07\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{3,4})'
+# Use original ChatGPT phone regex for consistency, with normalization
+PHONE_REGEX = r'(?:\+44\s?7\d{3}|0\s?7\d{3}|\(?07\d{3}\)?)\s?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3,4}'
 EMAIL_REGEX = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
 
 def serpapi_search(query: str, num_results: int = 10) -> List[dict]:
@@ -49,7 +48,7 @@ def serpapi_search(query: str, num_results: int = 10) -> List[dict]:
         st.error(f"Unexpected error: {e}")
         return []
 
-# Alternative using googlesearch (uncomment to use)
+# Alternative using googlesearch (uncomment to use if no SerpAPI key)
 """
 try:
     from googlesearch import search
@@ -61,7 +60,11 @@ def serpapi_search(query: str, num_results: int = 10) -> List[dict]:
     results = []
     try:
         logger.info(f"Executing Google search query: {query}")
-        for url in search(query, num_results=num_results, pause=2.0):
+        # Rotate User-Agents to reduce blocks
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        for url in search(query, num_results=num_results, pause=3.0):
             results.append({"link": url, "title": url})
         logger.info(f"Found {len(results)} search results for query: {query}")
         return results
@@ -78,7 +81,7 @@ def extract_contacts(text: str) -> tuple[Set[str], Set[str]]:
     phones = set()
     for phone in phones_raw:
         # Normalize phone number: remove spaces, dashes, parentheses
-        normalized = re.sub(r'[\s\-\(\)]', '', phone[0] if isinstance(phone, tuple) else phone)
+        normalized = re.sub(r'[\s\-\(\)]', '', phone)
         # Convert to +44 format if it starts with 0
         if normalized.startswith('0'):
             normalized = '+44' + normalized[1:]
@@ -181,22 +184,4 @@ def main():
                 if phones:
                     st.write("Mobile Phones:", ", ".join(phones))
                 else:
-                    st.write("Mobile Phones: None found")
-            else:
-                st.write("No contacts found on this page.")
-            time.sleep(1)  # Avoid overwhelming servers
-
-        if all_contacts:
-            st.success("Summary of unique contacts found:")
-            emails = sorted(set(contact["email"] for contact in all_contacts if contact["email"]))
-            phones = sorted(set(contact["phone"] for contact in all_contacts if contact["phone"]))
-            if emails:
-                st.write("**Emails:**", ", ".join(emails))
-            if phones:
-                st.write("**Mobile Phones:**", ", ".join(phones))
-            save_to_csv(all_contacts, OUTPUT_FILE)
-        else:
-            st.warning("No emails or mobile numbers found in the search results. Try a different query or uncheck 'Restrict to UK websites'.")
-
-if __name__ == "__main__":
-    main()
+                    st.write("Mobile
